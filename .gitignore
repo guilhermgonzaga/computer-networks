@@ -1,3 +1,5 @@
 *.o
 *.exe
 a.out
+simple-nfs/nfsclient
+simple-nfs/nfsserver
