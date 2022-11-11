@@ -2,11 +2,13 @@
 #define COMMON_H
 
 
+#include <string.h>
+
 #define NFS_PATH_MAX 512
 #define NFS_BUFSZ NFS_PATH_MAX
 #define NFS_PORT 7890
 
-// TODO perror or variadic macro
+// TODO use perror or variadic macro
 #define FAIL_IF(Err, Msg) \
 do if (Err) {fprintf(stderr, "%s\n", Msg); return EXIT_FAILURE;} while(0)
 
@@ -15,8 +17,6 @@ enum nfs_cmd {
 	NFS_CREATE,
 	NFS_UPLOAD_FILE,
 	NFS_DELETE,
-	// XXX NFS_DOWNLOAD,
-	// XXX NFS_MOVE,
 	NFS_INVALID
 };
 

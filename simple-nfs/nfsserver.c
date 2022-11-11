@@ -1,4 +1,5 @@
 // cc: gcc -g -pedantic -Wall -Wextra -o nfsserver nfsserver.c
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -28,8 +29,6 @@ int delete_recursive(const char *path);
 
 
 int main(void) {
-	// XXX FAIL_IF(chroot("."), "Could not set server root at current working directory");
-
 	struct sockaddr_in server_addr = {
 		.sin_family = AF_INET,
 		.sin_addr.s_addr = INADDR_ANY,
@@ -62,7 +61,7 @@ int handle_connection(int sockfd) {
 	int connfd = accept(sockfd, (struct sockaddr*)&client_addr, &len);
 	FAIL_IF(connfd < 0, "Server accept failed");
 
-	printf("New client connection\n");  // DEBUG
+	printf("New connection\n");
 
 	int8_t status = EXIT_FAILURE;
 
@@ -72,73 +71,77 @@ int handle_connection(int sockfd) {
 
 	if (-1 == send(connfd, &status, sizeof status, 0)) {
 		status = EXIT_FAILURE;
-		fprintf(stderr, "Failed to send response");  // DEBUG
+		fprintf(stderr, "Failed to send response");
 	}
 
 	close(connfd);
-	printf("Client connection closed\n");  // DEBUG
+	printf("Connection closed\n");
 
 	return status;
 }
 
 int handle_request(int connfd, char buffer[]) {
-	char path[NFS_PATH_MAX] = {0};
 	enum nfs_cmd cmd = buffer[0];
+	const char *path = buffer + 1;
 
-	printf("New request: %s %s\n", cmdtostr(cmd), &buffer[1]);
+	printf("Request: %s %s\n", cmdtostr(cmd), path);
 
-	if (realpath(&buffer[1], path)) {
-		if (cmd == NFS_LIST) {
-			if (EXIT_SUCCESS == list_dir(path, buffer)) {
-				send(connfd, buffer, strlen(buffer) + 1, 0);
-				return EXIT_SUCCESS;
-			}
+	if (cmd == NFS_LIST) {
+		if (EXIT_SUCCESS == list_dir(path, buffer)) {
+			send(connfd, buffer, 1 + strlen(path) + 1, 0);
+			return EXIT_SUCCESS;
 		}
-		else if (cmd == NFS_CREATE) {
-			return create(path);
-		}
-		else if (cmd == NFS_UPLOAD_FILE) {
-			return save_to_file(path, connfd, buffer);
-		}
-		else if (cmd == NFS_DELETE) {
-			return delete(path);
-		}
+	}
+	else if (cmd == NFS_CREATE) {
+		return create(path);
+	}
+	else if (cmd == NFS_UPLOAD_FILE) {
+		return save_to_file(path, connfd, buffer);
+	}
+	else if (cmd == NFS_DELETE) {
+		return delete(path);
 	}
 
 	return EXIT_FAILURE;
 }
 
 int list_dir(const char *path, char buffer[]) {
-	int offset = 0;
-	struct dirent *dirent;
+	buffer[0] = EXIT_SUCCESS;
+	errno = 0;
+
 	DIR *dir = opendir(path);
-	FAIL_IF(NULL == dir, "Failed to open directory");
+	if (dir) {
+		struct dirent *dirent;
+		int offset = 1;
 
-	while (offset < NFS_BUFSZ && NULL != (dirent = readdir(dir))) {
-		if (0 == strcmp(dirent->d_name, ".") || 0 == strcmp(dirent->d_name, ".."))
-			continue;
+		while (offset < NFS_BUFSZ && NULL != (dirent = readdir(dir))) {
+			if (strcmp(dirent->d_name, ".") && strcmp(dirent->d_name, "..")) {
+				offset += sprintf(buffer + offset, "%.*s\n", NFS_BUFSZ - offset, dirent->d_name);
+			}
+		}
 
-		int len = sprintf(buffer+offset, "%.*s\n", NFS_BUFSZ-offset, dirent->d_name);
-		// if (offset + len < NFS_BUFSZ) {
-			offset += len;
-		// }
-		// else {
-		// 	send(connfd, buffer, NFS_BUFSZ, 0);
-		// 	offset = sprintf(buffer, "%.*s\n", NFS_BUFSZ, dirent->d_name + len);
-		// }
+		if (1 == offset)
+			buffer[1] = '\0';
+
+		closedir(dir);
 	}
-	// int status = -1 == send(connfd, buffer, , 0) ? EXIT_FAILURE : EXIT_SUCCESS;
 
-	closedir(dir);
-	return EXIT_SUCCESS;
+	if (errno) {
+		strerror_r(errno, buffer + 1, NFS_BUFSZ - 1);
+		buffer[0] = EXIT_FAILURE;
+	}
+
+	return buffer[0];
 }
 
 int create(const char *path) {
-	return mkdir(path, 0666) ? EXIT_FAILURE : EXIT_SUCCESS;
-	// TODO remove
-	// FILE *fp = fopen(path, "w");
-	// fclose(fp);
-	// return EXIT_SUCCESS;
+	if ('/' == path[strlen(path) - 1]) {
+		return mkdir(path, 0666) ? EXIT_FAILURE : EXIT_SUCCESS;
+	}
+	else {
+		FILE *f = fopen(path, "a");
+		return (f && !fclose(f)) ? EXIT_SUCCESS : EXIT_FAILURE;
+	}
 }
 
 int save_to_file(const char *path, int connfd, char buffer[]) {
@@ -157,35 +160,41 @@ int save_to_file(const char *path, int connfd, char buffer[]) {
 int delete(const char *path) {
 	struct stat stbuf;
 	stat(path, &stbuf);
+	int status = EXIT_SUCCESS;
 
-	if (S_ISDIR(stbuf.st_mode))
-		FAIL_IF(-1 == delete_recursive(path), "Failed to delete directory");
-	else if (S_ISREG(stbuf.st_mode))
-		FAIL_IF(-1 == remove(path), "Failed to delete file");
+	if (S_ISDIR(stbuf.st_mode) && -1 == delete_recursive(path)) {
+		status = EXIT_FAILURE;
+	}
 
-	return EXIT_SUCCESS;
+	if (EXIT_FAILURE != status && -1 == remove(path)) {
+		status = EXIT_FAILURE;
+	}
+
+	return status;
 }
 
 int delete_recursive(const char *path) {
 	_Bool failed = 0;
 	struct dirent *dirent;
-	DIR *dir = opendir(".");
+	DIR *dir = opendir(path);
 
 	if (NULL == dir)
 		return EXIT_FAILURE;
 
-	while (!failed && NULL != (dirent = readdir(dir))) {  // XXX use readdir_r?
-		if (DT_DIR == dirent->d_type &&
-		    strcmp(dirent->d_name, ".") &&
-		    strcmp(dirent->d_name, "..")) {
-			char subdir[NFS_PATH_MAX];
-			strcpy(subdir, path);
-			strcat(subdir, "/");
-			strcat(subdir, dirent->d_name);
-			failed = EXIT_FAILURE == delete_recursive(subdir);
-		}
+	char subdir[NFS_PATH_MAX];
 
-		if (-1 == remove(path))
+	while (!failed && NULL != (dirent = readdir(dir))) {
+		if (0 == strcmp(dirent->d_name, ".") || 0 == strcmp(dirent->d_name, ".."))
+			continue;
+
+		strcpy(subdir, path);
+		strcat(subdir, "/");
+		strcat(subdir, dirent->d_name);
+
+		if (DT_DIR == dirent->d_type)
+			failed = (EXIT_FAILURE == delete_recursive(subdir));
+
+		if (-1 == remove(subdir))
 			failed = 1;
 	}
 
