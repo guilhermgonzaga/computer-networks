@@ -3,3 +3,5 @@
 a.out
 simple-nfs/nfsclient
 simple-nfs/nfsserver
+udp-echo/client
+udp-echo/server
